@@ -1,17 +1,17 @@
-# SQLite databases
-*.db
-*.sqlite
-*.sqlite3
+# SQLite database files
+db/*.db
+db/*.sqlite
+db/*.sqlite3
 
-# Perl temporary files
+# Generated HTML reports
+report.html
+
+# Perl temporary/test artifacts
 *.tmp
+*.bak
 
-# Generated reports
-reports/*.html
-reports/*.csv
-
-# Editor / OS files
-.vscode/
-.idea/
+# OS/editor files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
