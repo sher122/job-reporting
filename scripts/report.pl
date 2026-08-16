@@ -125,18 +125,17 @@ sub get_failure_rate {
 # extended to support them later.
 # ------------------------------------------------------------
 
+# The current schema permits only SUCCESS and FAILURE for jobs.status.
+# Therefore PENDING is not currently a legal persisted status and this
+# query intentionally returns 0 unless the schema is extended later.
 sub get_pending_jobs {
     my ($dbh) = @_;
 
     my ($count) = $dbh->selectrow_array(
-        q{
-            SELECT COUNT(*)
-            FROM jobs
-            WHERE status = 'PENDING'
-        }
+        "SELECT COUNT(*) FROM jobs WHERE status = 'PENDING'"
     );
 
-    return $count // 0;
+    return $count;
 }
 
 # ------------------------------------------------------------

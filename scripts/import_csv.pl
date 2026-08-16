@@ -7,7 +7,6 @@ use DBI;
 use FindBin qw($Bin);
 use File::Spec;
 
-
 # ============================================================
 # Configuration
 # ============================================================
@@ -35,7 +34,6 @@ my $SCHEMA_FILE = File::Spec->catfile(
     $PROJECT_ROOT,
     'schema.sql'
 );
-
 
 # ============================================================
 # CSV parser
@@ -76,12 +74,10 @@ sub parse_csv_line {
                 else {
                     $in_quotes = 0;
                 }
-
             }
             else {
                 $field .= $char;
             }
-
         }
         else {
 
@@ -106,7 +102,6 @@ sub parse_csv_line {
     return \@fields;
 }
 
-
 # ============================================================
 # Read schema
 # ============================================================
@@ -125,7 +120,6 @@ sub read_schema {
 
     return $schema;
 }
-
 
 # ============================================================
 # Execute schema
@@ -154,7 +148,6 @@ sub initialize_schema {
     }
 }
 
-
 # ============================================================
 # Connect to SQLite
 # ============================================================
@@ -177,9 +170,9 @@ sub connect_database {
         '',
         '',
         {
-            RaiseError => 1,
-            AutoCommit => 1,
-            sqlite_unicode => 1,
+            RaiseError      => 1,
+            AutoCommit      => 1,
+            sqlite_unicode  => 1,
         }
     );
 
@@ -189,13 +182,143 @@ sub connect_database {
     return $dbh;
 }
 
+# ============================================================
+# Normalize timestamp
+#
+# Project 1 writes timestamps in Perl's localtime format:
+#
+#   Sun Aug 16 12:06:28 2026
+#
+# SQLite/reporting uses:
+#
+#   2026-08-16 12:06:28
+# ============================================================
+
+sub normalize_timestamp {
+    my ($timestamp) = @_;
+
+    return undef
+        unless defined $timestamp && length $timestamp;
+
+    # --------------------------------------------------------
+    # Already-normalized SQLite format:
+    #
+    # 2026-08-16 12:06:28
+    # --------------------------------------------------------
+
+    if (
+        $timestamp =~
+        /\A
+        (\d{4})-
+        (\d{2})-
+        (\d{2})
+        \s+
+        (\d{2}):(\d{2}):(\d{2})
+        \z
+        /x
+    ) {
+        return $timestamp;
+    }
+
+    # --------------------------------------------------------
+    # ISO-8601 format used by test fixtures:
+    #
+    # 2026-08-14T10:00:00
+    # --------------------------------------------------------
+
+    if (
+        $timestamp =~
+        /\A
+        (\d{4})-
+        (\d{2})-
+        (\d{2})
+        T
+        (\d{2}):(\d{2}):(\d{2})
+        \z
+        /x
+    ) {
+        return sprintf(
+            "%04d-%02d-%02d %02d:%02d:%02d",
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6
+        );
+    }
+
+    # --------------------------------------------------------
+    # Perl localtime format produced by Project 1:
+    #
+    # Sun Aug 16 12:06:28 2026
+    # --------------------------------------------------------
+
+    my %months = (
+        Jan => '01',
+        Feb => '02',
+        Mar => '03',
+        Apr => '04',
+        May => '05',
+        Jun => '06',
+        Jul => '07',
+        Aug => '08',
+        Sep => '09',
+        Oct => '10',
+        Nov => '11',
+        Dec => '12',
+    );
+
+    if (
+        $timestamp =~
+        /\A
+        \w{3}\s+
+        (\w{3})\s+
+        (\d{1,2})\s+
+        (\d{2}):(\d{2}):(\d{2})\s+
+        (\d{4})
+        \z
+        /x
+    ) {
+        my (
+            $month,
+            $day,
+            $hour,
+            $minute,
+            $second,
+            $year
+        ) = (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6
+        );
+
+        die "Invalid timestamp month: $month\n"
+            unless exists $months{$month};
+
+        return sprintf(
+            "%04d-%s-%02d %02d:%02d:%02d",
+            $year,
+            $months{$month},
+            $day,
+            $hour,
+            $minute,
+            $second
+        );
+    }
+
+    die "Invalid timestamp format: $timestamp\n";
+}
 
 # ============================================================
 # Parse and validate one CSV row
 #
 # Expected columns:
 #
-# timestamp,job_id,priority,type,attempt,status
+#   timestamp,job_id,priority,type,attempt,status
 # ============================================================
 
 sub parse_job_row {
@@ -239,8 +362,11 @@ sub parse_job_row {
         unless defined $timestamp
         && $timestamp ne '';
 
+    # Normalize the timestamp before the row enters the database.
+    my $normalized_timestamp = normalize_timestamp($timestamp);
+
     return {
-        timestamp => $timestamp,
+        timestamp => $normalized_timestamp,
         job_id    => $job_id,
         priority  => $priority,
         type      => $type,
@@ -248,7 +374,6 @@ sub parse_job_row {
         status    => $status,
     };
 }
-
 
 # ============================================================
 # Read CSV
@@ -296,7 +421,6 @@ sub read_csv {
     return \@rows;
 }
 
-
 # ============================================================
 # Reset database contents
 #
@@ -317,7 +441,6 @@ sub reset_database {
     );
 }
 
-
 # ============================================================
 # Group attempts by job
 # ============================================================
@@ -336,8 +459,13 @@ sub build_jobs {
 
     return \%jobs;
 }
-
-
+# Import strategy:
+# Each import performs a complete database reload inside a transaction.
+# This makes repeated imports of the same CSV idempotent.
+#
+# Duplicate (job_id, attempt) rows within a single CSV are not silently
+# ignored. The UNIQUE constraint rejects them and the transaction rolls
+# back, so the entire import fails rather than partially applying data.
 # ============================================================
 # Insert logical jobs
 #
@@ -387,7 +515,6 @@ sub insert_jobs {
     }
 }
 
-
 # ============================================================
 # Insert individual attempt records
 # ============================================================
@@ -421,7 +548,6 @@ sub insert_attempts {
         );
     }
 }
-
 
 # ============================================================
 # Import CSV into SQLite
@@ -534,7 +660,6 @@ sub import_csv {
     return 0;
 }
 
-
 # ============================================================
 # Programmatic entry point
 #
@@ -555,7 +680,6 @@ sub main {
     );
 }
 
-
 # ============================================================
 # Script entry point
 # ============================================================
@@ -575,6 +699,5 @@ unless (caller) {
 
     exit $exit_code;
 }
-
 
 1;
