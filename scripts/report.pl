@@ -3,213 +3,177 @@
 use strict;
 use warnings;
 
-use DBI;
 use FindBin qw($Bin);
+use File::Spec;
+use DBI;
+
+# ============================================================
+# Job Reporting CLI
+#
+# Reports:
+#   - Jobs completed today
+#   - Average Retry Overhead
+#   - Failure rate
+#   - Jobs pending
+#
+# Average Retry Overhead means:
+#
+#   Average elapsed time between the first and final attempt
+#   for jobs whose final status is SUCCESS.
+#
+# Single-attempt successful jobs therefore contribute 0 seconds.
+#
+# The current schema does not permit PENDING as a jobs.status
+# value, so the pending query currently returns 0 by design.
+# ============================================================
 
 # ------------------------------------------------------------
-# Configuration
+# Database path
 # ------------------------------------------------------------
 
-my $project_root = "$Bin/..";
-my $database_file = "$project_root/db/job_reporting.db";
+my $db_file = File::Spec->catfile(
+    $Bin,
+    '..',
+    'db',
+    'job_reporting.db'
+);
 
 # ------------------------------------------------------------
-# Database connection
+# Connect to SQLite
 # ------------------------------------------------------------
 
-sub connect_database {
-    my ($database_file) = @_;
+die "Database does not exist: $db_file\n"
+    unless -f $db_file;
 
-    my $dbh = DBI->connect(
-        "dbi:SQLite:dbname=$database_file",
-        "",
-        "",
-        {
-            RaiseError => 1,
-            AutoCommit => 1,
-        }
-    );
-
-    return $dbh;
-}
+my $dbh = DBI->connect(
+    "dbi:SQLite:dbname=$db_file",
+    "",
+    "",
+    {
+        RaiseError => 1,
+        AutoCommit => 1,
+    }
+);
 
 # ------------------------------------------------------------
 # Jobs completed today
-#
-# A job is considered completed when its final status is SUCCESS.
-# The report uses completed_at to determine whether completion
-# happened today.
 # ------------------------------------------------------------
 
-sub get_completed_today {
-    my ($dbh) = @_;
+my ($completed_today) = $dbh->selectrow_array(q{
+    SELECT COUNT(*)
+    FROM jobs
+    WHERE status = 'SUCCESS'
+      AND created_at IS NOT NULL
+      AND completed_at IS NOT NULL
+      AND date(completed_at) = date('now', 'localtime')
+});
 
-    my ($count) = $dbh->selectrow_array(
-        q{
-            SELECT COUNT(*)
-            FROM jobs
-            WHERE status = 'SUCCESS'
-              AND date(completed_at) = date('now', 'localtime')
-        }
-    );
-
-    return $count // 0;
-}
+$completed_today ||= 0;
 
 # ------------------------------------------------------------
-# Average turnaround time
+# Average Retry Overhead
 #
-# Turnaround time is:
+# IMPORTANT:
+# Only successful jobs are included.
 #
-# completed_at - created_at
-#
-# created_at represents the first attempt timestamp.
-# completed_at represents the final attempt timestamp.
+# This keeps this report consistent with report_html.pl.
 # ------------------------------------------------------------
 
-sub get_average_turnaround {
-    my ($dbh) = @_;
+my ($average_retry_overhead) = $dbh->selectrow_array(q{
+    SELECT AVG(
+        (julianday(completed_at) - julianday(created_at))
+        * 86400.0
+    )
+    FROM jobs
+    WHERE status = 'SUCCESS'
+      AND created_at IS NOT NULL
+      AND completed_at IS NOT NULL
+});
 
-    my ($average) = $dbh->selectrow_array(
-        q{
-            SELECT AVG(
-                (julianday(completed_at) - julianday(created_at))
-                * 86400.0
-            )
-            FROM jobs
-            WHERE status = 'SUCCESS'
-              AND created_at IS NOT NULL
-              AND completed_at IS NOT NULL
-        }
-    );
-
-    return defined $average ? $average : 0;
-}
+$average_retry_overhead ||= 0;
 
 # ------------------------------------------------------------
 # Failure rate
 #
-# Failure rate is the percentage of logical jobs whose final
-# status is FAILURE.
+# Failure rate is based on final job status.
+# ------------------------------------------------------------
+
+my ($total_jobs) = $dbh->selectrow_array(q{
+    SELECT COUNT(*)
+    FROM jobs
+});
+
+my ($failed_jobs) = $dbh->selectrow_array(q{
+    SELECT COUNT(*)
+    FROM jobs
+    WHERE status = 'FAILURE'
+});
+
+$total_jobs ||= 0;
+$failed_jobs ||= 0;
+
+my $failure_rate = 0;
+
+if ($total_jobs > 0) {
+    $failure_rate =
+        ($failed_jobs / $total_jobs) * 100;
+}
+
+# ------------------------------------------------------------
+# Pending jobs
 #
-# We deliberately calculate this at the jobs level rather than
-# counting failed attempts, because a retried job may contain
-# several failed attempts but ultimately succeed.
-# ------------------------------------------------------------
-
-sub get_failure_rate {
-    my ($dbh) = @_;
-
-    my ($rate) = $dbh->selectrow_array(
-        q{
-            SELECT
-                CASE
-                    WHEN COUNT(*) = 0 THEN 0
-                    ELSE
-                        (SUM(CASE WHEN status = 'FAILURE' THEN 1 ELSE 0 END)
-                        * 100.0) / COUNT(*)
-                END
-            FROM jobs
-        }
-    );
-
-    return defined $rate ? $rate : 0;
-}
-
-# ------------------------------------------------------------
-# Jobs still pending
+# PENDING is not currently a legal jobs.status value.
+# This query is deliberately retained at the reporting layer
+# so the report is ready if the schema is extended later.
 #
-# Project 1 currently produces SUCCESS or FAILURE final states.
-# This query is nevertheless kept at the reporting layer so
-# the report correctly handles pending jobs if the schema is
-# extended to support them later.
+# Under the current schema this always returns 0.
 # ------------------------------------------------------------
 
-# The current schema permits only SUCCESS and FAILURE for jobs.status.
-# Therefore PENDING is not currently a legal persisted status and this
-# query intentionally returns 0 unless the schema is extended later.
-sub get_pending_jobs {
-    my ($dbh) = @_;
+my ($pending) = $dbh->selectrow_array(q{
+    SELECT COUNT(*)
+    FROM jobs
+    WHERE status = 'PENDING'
+});
 
-    my ($count) = $dbh->selectrow_array(
-        "SELECT COUNT(*) FROM jobs WHERE status = 'PENDING'"
-    );
-
-    return $count;
-}
+$pending ||= 0;
 
 # ------------------------------------------------------------
-# Print report
+# Close database
 # ------------------------------------------------------------
 
-sub print_report {
-    my ($dbh) = @_;
-
-    my $completed_today = get_completed_today($dbh);
-    my $average_turnaround = get_average_turnaround($dbh);
-    my $failure_rate = get_failure_rate($dbh);
-    my $pending_jobs = get_pending_jobs($dbh);
-
-    print "\n";
-    print "Job Reporting Dashboard\n";
-    print "=======================\n";
-    print "\n";
-
-    print "Jobs completed today: ",
-          $completed_today,
-          "\n";
-
-    printf "Average turnaround:   %.2f seconds\n",
-           $average_turnaround;
-
-    printf "Failure rate:          %.2f%%\n",
-           $failure_rate;
-
-    print "Jobs pending:          ",
-          $pending_jobs,
-          "\n";
-
-    print "\n";
-}
+$dbh->disconnect();
 
 # ------------------------------------------------------------
-# Application entry point
+# Display formatting
 # ------------------------------------------------------------
 
-sub main {
-    my $dbh;
+my $average_display = sprintf(
+    "%.2f seconds",
+    $average_retry_overhead
+);
 
-    eval {
-        $dbh = connect_database($database_file);
-
-        print_report($dbh);
-
-        1;
-    }
-    or do {
-        my $error = $@ || "Unknown database error";
-
-        chomp $error;
-
-        print STDERR "Application error: $error\n";
-
-        return 2;
-    };
-
-    $dbh->disconnect() if $dbh;
-
-    return 0;
-}
+my $failure_display = sprintf(
+    "%.2f%%",
+    $failure_rate
+);
 
 # ------------------------------------------------------------
-# Run only when executed directly.
-#
-# This allows the file to be required by tests without
-# automatically running the application.
+# Output
 # ------------------------------------------------------------
 
-unless (caller) {
-    exit main();
-}
+print "\n";
+print "Job Reporting Dashboard\n";
+print "=======================\n";
+print "\n";
 
-1;
+print "Jobs completed today: $completed_today\n";
+
+print "Average Retry Overhead: $average_display\n";
+
+print "Failure rate:          $failure_display\n";
+
+print "Jobs pending:          $pending\n";
+
+print "\n";
+
+exit 0;

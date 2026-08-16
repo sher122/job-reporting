@@ -1,0 +1,17 @@
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Perl temporary files
+*.tmp
+
+# Generated reports
+reports/*.html
+reports/*.csv
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

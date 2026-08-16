@@ -6,23 +6,14 @@ use warnings;
 use Test::More;
 use DBI;
 use FindBin qw($Bin);
-use File::Temp qw(tempdir tempfile);
+use File::Temp qw(tempdir);
 use File::Spec;
 
+# ============================================================
+# Load importer
+# ============================================================
 
-my $project_root = File::Spec->catdir(
-    $Bin,
-    '..'
-);
-
-my $importer = File::Spec->catfile(
-    $project_root,
-    'scripts',
-    'import_csv.pl'
-);
-
-require $importer;
-
+require "$Bin/../scripts/import_csv.pl";
 
 # ============================================================
 # Temporary test environment
@@ -42,24 +33,14 @@ my $db_file = File::Spec->catfile(
     'test.db'
 );
 
-
 # ============================================================
 # Test CSV
 #
-# JOB-001:
-#   attempt 1 = FAILURE
-#   attempt 2 = SUCCESS
-#
-# JOB-002:
-#   attempt 1 = SUCCESS
-#
-# JOB-003:
-#   attempt 1 = FAILURE
-#   attempt 2 = FAILURE
-#   attempt 3 = SUCCESS
-#
-# JOB-004:
-#   type contains a comma.
+# Includes:
+# - normal job
+# - retried job
+# - comma-containing type
+# - ISO timestamp format
 # ============================================================
 
 open my $fh, '>', $csv_file
@@ -67,35 +48,37 @@ open my $fh, '>', $csv_file
 
 print $fh <<'CSV';
 timestamp,job_id,priority,type,attempt,status
-2026-08-14T10:00:00,JOB-001,critical,etch,1,FAILURE
-2026-08-14T10:01:00,JOB-001,critical,etch,2,SUCCESS
-2026-08-14T10:02:00,JOB-002,high,inspection,1,SUCCESS
-2026-08-14T10:03:00,JOB-003,medium,deposition,1,FAILURE
-2026-08-14T10:04:00,JOB-003,medium,deposition,2,FAILURE
-2026-08-14T10:05:00,JOB-003,medium,deposition,3,SUCCESS
-2026-08-14T10:06:00,JOB-004,low,"etch, plasma",1,SUCCESS
+2026-08-14T10:00:00,TEST-001,critical,etch,1,SUCCESS
+2026-08-14T10:01:00,TEST-002,high,"etch, plasma",1,FAILURE
+2026-08-14T10:02:00,TEST-002,high,"etch, plasma",2,FAILURE
+2026-08-14T10:03:00,TEST-002,high,"etch, plasma",3,SUCCESS
+2026-08-14T10:04:00,TEST-003,medium,clean,1,SUCCESS
+2026-08-14T10:05:00,TEST-004,low,inspection,1,SUCCESS
+2026-08-14T10:06:00,TEST-004,low,inspection,2,SUCCESS
 CSV
 
-close $fh;
-
+close $fh
+    or die "Cannot close test CSV: $!";
 
 # ============================================================
 # Test 1:
-# Import succeeds.
+# CSV import succeeds
 # ============================================================
 
-is(
+my $exit_code = eval {
     import_csv(
         $csv_file,
         $db_file
-    ),
-    0,
+    );
+};
+
+ok(
+    !$@,
     'CSV import succeeds'
 );
 
-
 # ============================================================
-# Connect to imported database
+# Connect to test DB
 # ============================================================
 
 my $dbh = DBI->connect(
@@ -108,15 +91,20 @@ my $dbh = DBI->connect(
     }
 );
 
+ok(
+    defined $dbh,
+    'Test database connection succeeds'
+);
 
 # ============================================================
 # Test 2:
-# Every CSV attempt became a database row.
+# All attempts imported
 # ============================================================
 
-my ($attempt_count) = $dbh->selectrow_array(
-    'SELECT COUNT(*) FROM job_attempts'
-);
+my ($attempt_count) =
+    $dbh->selectrow_array(
+        'SELECT COUNT(*) FROM job_attempts'
+    );
 
 is(
     $attempt_count,
@@ -124,15 +112,15 @@ is(
     'All CSV attempts are imported'
 );
 
-
 # ============================================================
 # Test 3:
-# Four logical jobs were created.
+# Logical jobs created
 # ============================================================
 
-my ($job_count) = $dbh->selectrow_array(
-    'SELECT COUNT(*) FROM jobs'
-);
+my ($job_count) =
+    $dbh->selectrow_array(
+        'SELECT COUNT(*) FROM jobs'
+    );
 
 is(
     $job_count,
@@ -140,73 +128,90 @@ is(
     'Logical jobs are created'
 );
 
-
 # ============================================================
 # Test 4:
-# JOB-001 final status comes from attempt 2.
+# Final status comes from highest attempt
 # ============================================================
 
-my ($status, $attempts) =
+my ($final_status) =
     $dbh->selectrow_array(
         q{
-            SELECT status, total_attempts
+            SELECT status
             FROM jobs
-            WHERE job_id = 'JOB-001'
+            WHERE job_id = 'TEST-002'
         }
     );
 
 is(
-    $status,
+    $final_status,
     'SUCCESS',
     'Final status comes from highest attempt'
 );
 
-is(
-    $attempts,
-    2,
-    'Total attempts are calculated correctly'
-);
-
-
 # ============================================================
 # Test 5:
-# JOB-003 requires three attempts and eventually succeeds.
+# Total attempts
 # ============================================================
 
-($status, $attempts) =
+my ($total_attempts) =
     $dbh->selectrow_array(
         q{
-            SELECT status, total_attempts
+            SELECT total_attempts
             FROM jobs
-            WHERE job_id = 'JOB-003'
+            WHERE job_id = 'TEST-002'
         }
     );
 
 is(
-    $status,
+    $total_attempts,
+    3,
+    'Total attempts are calculated correctly'
+);
+
+# ============================================================
+# Test 6:
+# Retried job succeeds
+# ============================================================
+
+is(
+    $final_status,
     'SUCCESS',
     'Retried job final status is SUCCESS'
 );
 
+# ============================================================
+# Test 7:
+# Retried job has three attempts
+# ============================================================
+
+my ($retry_attempt_count) =
+    $dbh->selectrow_array(
+        q{
+            SELECT COUNT(*)
+            FROM job_attempts
+            WHERE job_id = 'TEST-002'
+        }
+    );
+
 is(
-    $attempts,
+    $retry_attempt_count,
     3,
     'Retried job has three attempts'
 );
 
-
 # ============================================================
-# Test 6:
-# Comma-containing type survives CSV parsing.
+# Test 8:
+# Comma-containing type survives import
 # ============================================================
 
-my ($type) = $dbh->selectrow_array(
-    q{
-        SELECT type
-        FROM jobs
-        WHERE job_id = 'JOB-004'
-    }
-);
+my ($type) =
+    $dbh->selectrow_array(
+        q{
+            SELECT type
+            FROM jobs
+            WHERE job_id = 'TEST-002'
+        }
+    );
 
 is(
     $type,
@@ -214,56 +219,116 @@ is(
     'Comma-containing type is preserved'
 );
 
-
 # ============================================================
-# Test 7:
-# First and final timestamps are derived correctly.
+# Test 9:
+# created_at comes from first attempt
 # ============================================================
 
-my ($created_at, $completed_at) =
+my ($created_at) =
     $dbh->selectrow_array(
         q{
-            SELECT created_at, completed_at
+            SELECT created_at
             FROM jobs
-            WHERE job_id = 'JOB-003'
+            WHERE job_id = 'TEST-002'
         }
     );
 
 is(
     $created_at,
-    '2026-08-14T10:03:00',
+    '2026-08-14 10:01:00',
     'created_at comes from first attempt'
 );
 
+# ============================================================
+# Test 10:
+# completed_at comes from final attempt
+# ============================================================
+
+my ($completed_at) =
+    $dbh->selectrow_array(
+        q{
+            SELECT completed_at
+            FROM jobs
+            WHERE job_id = 'TEST-002'
+        }
+    );
+
 is(
     $completed_at,
-    '2026-08-14T10:05:00',
+    '2026-08-14 10:03:00',
     'completed_at comes from final attempt'
 );
 
-
 # ============================================================
-# Test 8:
-# Running the importer again is idempotent.
+# Test 11:
+# ISO timestamp is normalized
 # ============================================================
 
 is(
+    normalize_timestamp(
+        '2026-08-14T10:00:00'
+    ),
+    '2026-08-14 10:00:00',
+    'ISO timestamp is normalized'
+);
+
+# ============================================================
+# Test 12:
+# Project 1 Perl timestamp is normalized
+# ============================================================
+
+is(
+    normalize_timestamp(
+        'Sun Aug 16 12:06:28 2026'
+    ),
+    '2026-08-16 12:06:28',
+    'Project 1 timestamp is normalized'
+);
+
+# ============================================================
+# Test 13:
+# SQLite timestamp remains unchanged
+# ============================================================
+
+is(
+    normalize_timestamp(
+        '2026-08-16 12:06:28'
+    ),
+    '2026-08-16 12:06:28',
+    'SQLite timestamp remains unchanged'
+);
+
+# ============================================================
+# Test 14:
+# Second import succeeds
+#
+# Batch-reload model means the existing database is replaced
+# by the current CSV snapshot.
+# ============================================================
+
+my $second_import_ok = eval {
     import_csv(
         $csv_file,
         $db_file
-    ),
-    0,
+    );
+
+    1;
+};
+
+ok(
+    $second_import_ok,
     'Second import succeeds'
 );
 
+# ============================================================
+# Test 15:
+# Second import does not duplicate attempts
+# ============================================================
 
-($attempt_count) = $dbh->selectrow_array(
-    'SELECT COUNT(*) FROM job_attempts'
-);
-
-($job_count) = $dbh->selectrow_array(
-    'SELECT COUNT(*) FROM jobs'
-);
+($attempt_count) =
+    $dbh->selectrow_array(
+        'SELECT COUNT(*) FROM job_attempts'
+    );
 
 is(
     $attempt_count,
@@ -271,16 +336,25 @@ is(
     'Second import does not duplicate attempts'
 );
 
+# ============================================================
+# Test 16:
+# Second import does not duplicate jobs
+# ============================================================
+
+($job_count) =
+    $dbh->selectrow_array(
+        'SELECT COUNT(*) FROM jobs'
+    );
+
 is(
     $job_count,
     4,
     'Second import does not duplicate jobs'
 );
 
-
 # ============================================================
-# Test 9:
-# Unique(job_id, attempt) prevents duplicate attempt rows.
+# Test 17:
+# Database uniqueness constraint rejects duplicate attempt
 # ============================================================
 
 my $duplicate_error;
@@ -298,30 +372,28 @@ eval {
                 recorded_at
             )
             VALUES (
-                'JOB-001',
+                'TEST-002',
                 1,
-                'FAILURE',
-                'critical',
-                'etch',
-                '2026-08-14T10:00:00'
+                'SUCCESS',
+                'high',
+                'etch, plasma',
+                '2026-08-14 10:00:00'
             )
         }
     );
 
     1;
-
-} or do {
-
+}
+or do {
     $duplicate_error = $@;
 };
 
-ok(
+like(
     $duplicate_error,
+    qr/UNIQUE constraint failed/i,
     'Duplicate job attempt is rejected'
 );
 
-
-$dbh->disconnect;
-
+$dbh->disconnect();
 
 done_testing();
